@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: projet-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: projet
+  template:
+    metadata:
+      labels:
+        app: projet
+    spec:
+      containers:
+        - name: projet
+          image: projet:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8080
