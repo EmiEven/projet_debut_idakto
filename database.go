@@ -8,10 +8,14 @@ import (
 // DB => variable globale qui représente la connexion à la base de données
 var DB *gorm.DB // Type : *gorm.DB -> pointeur vers une instance de GORM
 
-type User struct { 
-	ID uint `gorm:"primaryKey"` 
-	Email string `gorm:"unique"` 
-} 
+
+type User struct {
+    ID        uint //`gorm:"primaryKey"` 
+    Nom       string
+    Prenom    string
+    Email     string `gorm:"unique"`
+    Password  string
+}
 
 
 //initDB() ouvre la base users.db et s’assure qu’il y a une table users avec les colonnes id et email
