@@ -8,42 +8,200 @@ import (
     "net/http"
 	"context" // sinon "undefined: context" même si j'ai déjà importer "context" dans oidc.go, chaque fichier Go importe ce qu'il utilise
 	"github.com/coreos/go-oidc"
+	"golang.org/x/crypto/bcrypt" // pour mdp
+	"golang.org/x/oauth2" // pour paramètre de session avec google
 )
+
+
+func loginClassic(w http.ResponseWriter, r *http.Request) {
+
+	if r.Method != http.MethodPost {
+		http.Redirect(w, r, "/", http.StatusFound)
+		return
+	}
+
+	email := r.FormValue("email")
+	password := r.FormValue("password")
+
+	if email == "" || password == "" {
+		http.Error(w, "Champs manquants", http.StatusBadRequest)
+		return
+	}
+
+	var user User
+	result := DB.Where("email = ?", email).First(&user)
+
+	if result.Error != nil {
+		http.Error(w, "Utilisateur introuvable", http.StatusUnauthorized)
+		return
+	}
+
+	// bcrypt => pour mdp haché
+	err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(password))
+	if err != nil {
+		http.Error(w, "Mot de passe incorrect", http.StatusUnauthorized)
+		return
+	}
+
+	// Création cookie session
+	cookie := http.Cookie{
+		Name:  "session",
+		Value: user.Email,
+		Path:  "/",
+		MaxAge: 20, // cookie dure 20s
+	}
+	http.SetCookie(w, &cookie)
+
+	http.Redirect(w, r, "/secret", http.StatusFound)
+}
 
 // définition du handler
 // fonction qui sera appelé à chaque fois qu'un utilisateur visite un URL
 // => w http.ResponseWriter -> permet d'envoyer une réponse au client(navigateur)
 // => r *http.Request -> contient les infos sur la requête (URL, headers, méthode...)
 func home(w http.ResponseWriter, r *http.Request) {
-	//fmt.Fprintln(w, "Serveur Go OK")
-    w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
-    cookie, err := r.Cookie("session")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
-    if err != nil || cookie.Value == "" {
-        // Pas connecté
-        fmt.Fprint(w, `
-            <h1>Bienvenue !</h1>
-            <a href="/login"><button>Se connecter avec Google</button></a>
-        `)
-        return
-    }
+	// vérifie si déjà connecté
+	cookie, err := r.Cookie("session")
+	if err == nil && cookie.Value != "" {
+		fmt.Fprintf(w, `
+			<h1>Bonjour !</h1>
+			<a href="/secret"><button>Accéder à la zone secrète</button></a>
+		`)
+		return
+	}
 
-    // Connecté
-    fmt.Fprintf(w, `
-        <h1>Bonjour !</h1>
-        <a href="/secret"><button>Accéder à la zone secrète</button></a>
-    `)
+	// page principale login
+	fmt.Fprint(w, `
+		<h1>Connexion</h1>
+
+		<form method="POST" action="/login-classic">
+			<label>Email :</label><br>
+			<input type="email" name="email"><br><br>
+
+			<label>Mot de passe :</label><br>
+			<input type="password" name="password"><br><br>
+
+			<button type="submit">Se connecter</button>
+		</form>
+
+		<br>
+
+		<a href="/inscription">
+			<button>S'inscrire</button>
+		</a>
+
+		<br><br>
+
+		<h3>Ou</h3>
+
+		<a href="/login">
+			<button>Se connecter avec Google</button>
+		</a>
+	`)
 }
 
 
+
+func handleInscription(w http.ResponseWriter, r *http.Request) {
+
+	// si méthode GET => afficher le formulaire
+	if r.Method == http.MethodGet {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, `
+			<h1>Inscription</h1>
+			<form method="POST" action="/inscription">
+				<label>Nom :</label><br>
+				<input type="text" name="nom"><br><br>
+
+				<label>Prénom :</label><br>
+				<input type="text" name="prenom"><br><br>
+
+				<label>Email :</label><br>
+				<input type="email" name="email"><br><br>
+
+				<label>Mot de passe :</label><br>
+				<input type="password" name="password"><br><br>
+
+				<label>Confirmer mot de passe :</label><br>
+				<input type="password" name="confirm"><br><br>
+
+				<button type="submit">S'inscrire</button>
+			</form>
+		`)
+		return
+	}
+
+	// si méthode POST => traiter les données
+	if r.Method == http.MethodPost {
+
+		nom := r.FormValue("nom")
+		prenom := r.FormValue("prenom")
+		email := r.FormValue("email")
+		password := r.FormValue("password")
+		confirm := r.FormValue("confirm")
+
+		//pour la validation
+
+		if nom == "" || prenom == "" || email == "" || password == "" || confirm == "" {
+			http.Error(w, "Tous les champs sont obligatoires", http.StatusBadRequest)
+			return
+		}
+
+		if password != confirm {
+			http.Error(w, "Les mots de passe ne correspondent pas", http.StatusBadRequest)
+			return
+		}
+
+		if len(password) < 4 {
+			http.Error(w, "Mot de passe trop court (min 4 caractères)", http.StatusBadRequest)
+			return
+		}
+
+
+		var existingUser User
+		result := DB.Where("email = ?", email).First(&existingUser)
+
+		if result.Error == nil {
+			http.Error(w, "Email déjà utilisé", http.StatusBadRequest)
+			return
+		}
+
+		// => création de l'utilisateur
+
+		// Hash du mot de passe
+		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+		if err != nil {
+			http.Error(w, "Erreur serveur", http.StatusInternalServerError)
+			return
+		}
+
+		newUser := User{
+			Nom:      nom,
+			Prenom:   prenom,
+			Email:    email,
+			Password: string(hashedPassword),
+		}
+
+		DB.Create(&newUser)
+
+		// redirection vers login
+		http.Redirect(w, r, "/", http.StatusFound)
+	}
+}
 
 // Quand quelqu’un va sur /login, on le renvoie chez Google pour qu’il se connecte
 func loginGoogle(w http.ResponseWriter, r *http.Request) {
 	// génère l'URL de redirection vers Google
 	// state-random = une chaîne pour le paramètre state (normalement un token anti-CSRF)
 	// l'URL générée contient : client_id, redirect_uri, scope, response_type=code, state
-    url := oauth2Config.AuthCodeURL("state-random")
+    url := oauth2Config.AuthCodeURL("state-random", oauth2.AccessTypeOffline, oauth2.ApprovalForce)
+	// paramètre à mettre pour forcer la session
+	// oauth2.ApprovalForce -> force Google à demander de se reconnecter, même si un cookie Google existe
+	// oauth2.AccessTypeOffline → utile pour obtenir un refresh token si tu en as besoin
+
 	// envoie une réponse HTTP 302 au navigateur
 	// le navigateur est redirigé vers l’URL de Google
 	// Google affiche sa page login
@@ -113,12 +271,16 @@ func callback(w http.ResponseWriter, r *http.Request) {
         Name:  "session",
         Value: claims.Email, 
         Path:  "/", // valable pour tout le site
+		MaxAge: 20, // cookie dure 20s
     }
     http.SetCookie(w, &cookie) // ajoute un header Set-Cookie à la réponse
 
 	
     // 8. Réponse
-    fmt.Fprintf(w, "Connecté avec Google ! Email : %s, ID BD : %d", claims.Email, user.ID) 
+    //fmt.Fprintf(w, "Connecté avec Google ! Email : %s, ID BD : %d", claims.Email, user.ID) 
+
+	// redirection vers login
+	http.Redirect(w, r, "/", http.StatusFound)
 }
 
 
@@ -152,6 +314,9 @@ func main() {
 	// routes publiques
 	//http.HandleFunc("/login", gestionnaire_login)
 	http.HandleFunc("/login", loginGoogle)
+
+	http.HandleFunc("/login-classic", loginClassic)
+	http.HandleFunc("/inscription", handleInscription)
 
 	http.HandleFunc("/callback", callback)
 
